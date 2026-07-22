@@ -14,7 +14,9 @@ func TestDefaultOpts(t *testing.T) {
 
 	require.NotNil(t, opts.Producer)
 	require.Equal(t, defaultInboxSize, opts.InboxSize)
-	require.Equal(t, defaultMaxRestarts, opts.MaxRestarts)
+	// int32, not int: require.Equal compares dynamic types, and the untyped
+	// constant would otherwise default to int and never match the field.
+	require.Equal(t, int32(defaultMaxRestarts), opts.MaxRestarts)
 	require.Equal(t, defaultRestartDelay, opts.RestartDelay)
 	require.Equal(t, "actor", opts.Kind)
 	require.Equal(t, "", opts.ID)
@@ -39,10 +41,10 @@ func TestOptionsApplyInOrder(t *testing.T) {
 // defaults instead of panicking. Test cases cover each clamp scenario.
 func TestOptionClamping(t *testing.T) {
 	tests := []struct {
-		name     string
-		apply    func(*Opts)
-		field    string
-		want     interface{}
+		name  string
+		apply func(*Opts)
+		field string
+		want  interface{}
 	}{
 		{
 			name:  "InboxSize zero clamped to default",
@@ -177,6 +179,10 @@ func TestSpawnWithNoOptionsStillWorks(t *testing.T) {
 
 // TestSpawnWithExplicitID verifies WithID("name") produces a PID reachable
 // by that ID and a PID.String that contains the ID.
+//
+// The registry key is the namespaced "kind/id" that buildID composes, not the
+// bare string handed to WithID: that is what makes the same id reusable across
+// kinds without collision.
 func TestSpawnWithExplicitID(t *testing.T) {
 	e := newTestEngine(t)
 	ch := make(chan any, 1)
@@ -187,7 +193,7 @@ func TestSpawnWithExplicitID(t *testing.T) {
 	)
 
 	require.Equal(t, "local/worker/seven", pid.String())
-	require.Equal(t, "seven", pid.ID)
+	require.Equal(t, "worker/seven", pid.ID)
 
 	// Verify it is reachable by Send.
 	e.Send(pid, "message")
