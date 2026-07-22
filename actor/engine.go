@@ -1,9 +1,24 @@
 package actor
 
 import (
+	"context"
 	"strconv"
 	"sync/atomic"
+	"time"
 )
+
+// poisonPill is the stop request in message form. It is deliberately
+// unexported: it travels an actor's ordinary inbox but is engine plumbing, and
+// process.Invoke intercepts it before the user's Receive is ever reached.
+//
+// cancel is the waiter's context.CancelFunc, fired once teardown is complete.
+// graceful records that the queued work ahead of the pill was allowed to
+// finish; it is always true today and exists as the seam for the abrupt-stop
+// variant that a later issue may add.
+type poisonPill struct {
+	cancel   context.CancelFunc
+	graceful bool
+}
 
 // LocalLookupAddr is the address every actor in this in-process engine is
 // reachable under. Remote addressing is out of scope for the proof of concept,
@@ -110,6 +125,75 @@ func (e *Engine) Send(pid *PID, msg any) {
 // via Context.Sender.
 func (e *Engine) SendWithSender(pid *PID, msg any, sender *PID) {
 	e.sendMessage(pid, msg, sender)
+}
+
+// Poison asks the actor at pid to stop once it has finished everything already
+// in its mailbox, and returns a context that is cancelled when the actor is
+// gone. It never blocks.
+//
+// The trick is that the stop request is itself a message: Poison builds a
+// cancellable context and sends a poisonPill through the very same inbox as
+// every other message, so ordering comes for free. Anything sent before the
+// pill is processed first; the actor is torn down only when the pill is
+// finally reached. There is no separate control channel to keep in step with
+// the mailbox, because there is no separate control channel.
+//
+// Messages sent *after* the pill is queued are never processed. They may be
+// pushed into an inbox that is about to stop and are silently abandoned there.
+// That is accepted in this proof of concept; issue #15 may route them to dead
+// letters instead.
+//
+// Poisoning an unknown PID, or an actor that has already stopped, returns an
+// already-cancelled context, so <-e.Poison(pid).Done() returns immediately
+// rather than hanging on a stop that will never happen.
+func (e *Engine) Poison(pid *PID) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	e.poison(pid, cancel)
+	return ctx
+}
+
+// PoisonAfter schedules a Poison of pid to be sent d from now and returns the
+// waiter's context immediately — the caller is never blocked, and may wait on
+// Done or ignore it entirely. If the actor has already stopped by the time the
+// timer fires, the delayed Poison finds a registry miss and simply cancels the
+// context; it never panics.
+func (e *Engine) PoisonAfter(pid *PID, d time.Duration) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(d, func() { e.poison(pid, cancel) })
+	return ctx
+}
+
+// Stop is an alias of Poison, for callers who find the name plainer. The
+// semantics are identical: queued work runs, then the actor stops.
+func (e *Engine) Stop(pid *PID) context.Context {
+	return e.Poison(pid)
+}
+
+// poison is the shared body of Poison and PoisonAfter. It registers cancel
+// with the target process and queues the pill, or — if there is no live actor
+// to receive it — cancels straight away so the caller is never left waiting.
+//
+// Registering the cancel with the process, rather than relying only on the
+// copy carried inside the pill, is what makes concurrent poisons safe: many
+// callers may queue a pill before the first one is handled, and only one
+// teardown will ever run. That teardown cancels every waiter it was handed.
+func (e *Engine) poison(pid *PID, cancel context.CancelFunc) {
+	if e.registry == nil {
+		cancel()
+		return
+	}
+	proc, ok := e.registry.get(pid).(*process)
+	if !ok || proc == nil {
+		cancel()
+		return
+	}
+	if !proc.addCancel(cancel) {
+		// The actor tore down between the lookup and here; nobody else will
+		// ever call this cancel, so it is ours to fire.
+		cancel()
+		return
+	}
+	proc.deliver(Envelope{Msg: poisonPill{cancel: cancel, graceful: true}})
 }
 
 // Address returns the address this engine is reachable under.

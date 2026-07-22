@@ -2,6 +2,7 @@ package actor
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"runtime/debug"
 	"sync"
@@ -27,6 +28,14 @@ type process struct {
 	engine   *Engine
 	mu       sync.Mutex
 	stopped  bool
+	// cancels holds one context.CancelFunc per pending Poison waiter. It is a
+	// slice and not a single func because any number of callers may poison the
+	// same actor before the first pill is handled — every one of them is
+	// holding a context.Context that must be cancelled by the single teardown
+	// that actually runs. Guarded by mu together with stopped: claiming stopped
+	// and snapshotting cancels under the same lock is what closes the window in
+	// which a late Poison could register a cancel that nobody would ever call.
+	cancels []context.CancelFunc
 	// restarts counts restart attempts so far. It is only ever mutated via
 	// sync/atomic: invokeMsg's recover can fire on the actor's own goroutine,
 	// which is the only writer, but tests read it from the outside.
@@ -76,15 +85,64 @@ func (p *process) Send(to *PID, msg any, sender *PID) {
 
 // Invoke walks the batch and delivers each envelope through the single
 // Context, never allocating a Context per message.
+//
+// A poisonPill is intercepted here, before invokeMsg, so the user's Receive
+// never sees it: it is engine plumbing, not a message the actor wrote code
+// for. Everything queued ahead of the pill has already been delivered by the
+// time it is reached — that is the whole point of routing the stop request
+// through the mailbox — and everything behind it in this batch is abandoned
+// along with the rest of the inbox.
 func (p *process) Invoke(msgs []Envelope) {
 	for i := range msgs {
+		if pill, ok := msgs[i].Msg.(poisonPill); ok {
+			p.handlePoison(pill)
+			return
+		}
 		p.invokeMsg(msgs[i])
 	}
 }
 
-// Shutdown delivers Stopped, stops the inbox, and removes the actor from the
-// registry — exactly once. A second call returns without delivering Stopped
-// again.
+// handlePoison runs the teardown a poisonPill asks for. It delegates to
+// Shutdown so Stopped stays exactly-once even when several pills are queued,
+// and cancels the pill's own context afterwards as a belt-and-braces measure:
+// Shutdown already cancels every waiter it snapshotted, and CancelFunc is
+// idempotent, so a pill whose cancel was claimed by an earlier teardown costs
+// nothing here.
+func (p *process) handlePoison(pill poisonPill) {
+	// TODO(#12): stop children first
+	p.Shutdown()
+	if pill.cancel != nil {
+		pill.cancel()
+	}
+}
+
+// addCancel registers cancel to be called when this process tears down. It
+// reports false if the actor has already stopped, in which case the caller
+// owns the cancel and must fire it immediately — waiting on a context nobody
+// will ever cancel is the one failure mode Poison must never produce.
+//
+// The check and the append happen under the same mutex Shutdown uses to claim
+// the stopped flag, so there is no interleaving in which a cancel is both
+// refused-by-nobody and never called: either it lands in the slice Shutdown
+// goes on to snapshot, or it sees stopped and is handed back.
+func (p *process) addCancel(cancel context.CancelFunc) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return false
+	}
+	p.cancels = append(p.cancels, cancel)
+	return true
+}
+
+// Shutdown delivers Stopped, removes the actor from the registry, stops the
+// inbox, and finally cancels every Poison waiter — exactly once. A second call
+// returns without delivering Stopped again.
+//
+// The step order is part of the contract, not an implementation detail. The
+// cancels fire last so that a caller woken by <-ctx.Done() finds an actor that
+// is genuinely gone: the PID no longer resolves and the inbox is closed. Were
+// cancel called first, the waiter could observe a PID that still routes.
 //
 // The stopped flag is claimed and the lock released *before* invokeMsg runs.
 // If Receive panics while handling Stopped, invokeMsg's recover routes back
@@ -99,11 +157,19 @@ func (p *process) Shutdown() {
 		return
 	}
 	p.stopped = true
+	// Take the waiters with the flag, under the one lock. Any Poison that
+	// arrives from here on sees stopped and cancels its own context directly.
+	cancels := p.cancels
+	p.cancels = nil
 	p.mu.Unlock()
 
 	p.invokeMsg(Envelope{Msg: Stopped{}})
-	_ = p.inbox.Stop()
 	p.engine.unregisterProcess(p.pid)
+	_ = p.inbox.Stop()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 // invokeMsg re-targets the single Context to e and calls Receive. Reusing one
