@@ -25,3 +25,21 @@ func DefaultOpts(p Producer) Opts {
 		InboxSize: defaultInboxSize,
 	}
 }
+
+// OptFunc mutates Opts at spawn time. It is the variadic option type the Spawn
+// family accepts. Issue #9 owns the full option surface; issue #8 defines the
+// type and only the two helpers the engine needs today.
+type OptFunc func(*Opts)
+
+// WithID pins an actor's identity so it is reachable under a stable
+// "kind/id". Without it the engine appends a process-unique suffix so two
+// spawns of the same kind never collide.
+func WithID(id string) OptFunc {
+	return func(o *Opts) { o.ID = id }
+}
+
+// WithInboxSize overrides the initial inbox capacity hint. The value is a
+// starting size, not a hard cap — the ring buffer grows on demand.
+func WithInboxSize(size int) OptFunc {
+	return func(o *Opts) { o.InboxSize = size }
+}

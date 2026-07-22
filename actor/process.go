@@ -91,14 +91,3 @@ func (p *process) Shutdown() {
 func (p *process) invokeMsg(e Envelope) {
 	p.receiver.Receive(p.context.withEnvelope(e))
 }
-
-// registerProcess is the registry insertion hook. Issue #7 builds the process
-// registry and #8 wires this to it; until then it is a no-op so the lifecycle
-// ordering in Start can be exercised in isolation.
-func (e *Engine) registerProcess(p Processer) {}
-
-// unregisterProcess is the registry removal hook, wired by #8.
-func (e *Engine) unregisterProcess(pid *PID) {}
-
-// sendMessage is the outbound routing hook, wired by #8.
-func (e *Engine) sendMessage(to *PID, msg any, sender *PID) {}
