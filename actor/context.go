@@ -1,5 +1,10 @@
 package actor
 
+import (
+	"strconv"
+	"sync/atomic"
+)
+
 // Context is the view an actor sees while handling a single message. It
 // exposes the message itself, who sent it, and the actor's own identity,
 // parent, engine, and receiver.
@@ -66,3 +71,40 @@ func (c *Context) Engine() *Engine { return c.engine }
 
 // Receiver returns the Receiver value this actor was spawned with.
 func (c *Context) Receiver() Receiver { return c.receiver }
+
+// childIDCounter provides unique suffixes for auto-generated child IDs
+// within a single parent. It is per-process, not global, so two parents
+// never collide on auto-generated child IDs.
+var childIDCounter uint64
+
+// SpawnChild spawns a child actor under this actor. The child's PID is
+// derived from the parent's PID via PID.Child, producing a nested ID of the
+// form "parentKind/parentID/kind/id". The child's Context.Parent() returns
+// this actor's PID.
+func (c *Context) SpawnChild(p Producer, kind string, opts ...OptFunc) *PID {
+	o := DefaultOpts(p)
+	o.Kind = kind
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.ID == "" {
+		n := atomic.AddUint64(&childIDCounter, 1)
+		o.ID = strconv.FormatUint(n, 10)
+	}
+	childID := kind + "/" + o.ID
+	o.ID = c.pid.Child(childID).ID
+	o.parent = c.pid
+	proc := newProcess(c.engine, o)
+	pid := c.engine.spawnProc(proc)
+	// Register the child PID with the parent process so cascade shutdown works.
+	if parentProc, ok := c.engine.registry.get(c.pid).(*process); ok && parentProc != nil {
+		parentProc.addChild(pid)
+	}
+	return pid
+}
+
+// SpawnChildFunc spawns a child actor from a function. It is the child variant
+// of Engine.SpawnFunc.
+func (c *Context) SpawnChildFunc(f func(*Context), kind string, opts ...OptFunc) *PID {
+	return c.SpawnChild(func() Receiver { return &funcReceiver{f: f} }, kind, opts...)
+}
