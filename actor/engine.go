@@ -58,9 +58,6 @@ func (e *Engine) Spawn(p Producer, kind string, opts ...OptFunc) *PID {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if o.InboxSize <= 0 {
-		o.InboxSize = defaultInboxSize
-	}
 	o.ID = e.buildID(kind, o.ID)
 	return e.spawnProc(newProcess(e, o))
 }
