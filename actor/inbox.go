@@ -23,14 +23,19 @@ const (
 	stateStopped int32 = 2
 )
 
-// Processer is what an inbox feeds batches of envelopes to. The full
-// interface — including lifecycle, panic recovery, and restarts — arrives
-// in issue #6; this minimal version is enough for the inbox to schedule
-// against. Invoke is called with a freshly-allocated slice of envelopes
-// taken from the ring buffer and may be called from any goroutine the
-// inbox decides to run on, but never from more than one at a time.
+// Processer is what an inbox feeds batches of envelopes to. The inbox only
+// calls Invoke, but the full engine-facing surface — lifecycle, addressing,
+// and shutdown — lives on the same interface; the concrete implementation is
+// the process in actor/process.go. Invoke is called with a freshly-allocated
+// slice of envelopes taken from the ring buffer and may be called from any
+// goroutine the inbox decides to run on, but never from more than one at a
+// time.
 type Processer interface {
+	Start()
+	PID() *PID
+	Send(to *PID, msg any, sender *PID)
 	Invoke(batch []Envelope)
+	Shutdown()
 }
 
 // Inboxer is the contract every inbox implementation satisfies. Engine

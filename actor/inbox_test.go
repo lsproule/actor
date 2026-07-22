@@ -33,6 +33,13 @@ func newFakeProcesser() *fakeProcesser {
 	}
 }
 
+// The inbox only ever calls Invoke; the rest satisfy the expanded Processer
+// interface (issue #6) so the fake still compiles against Inbox.Start.
+func (f *fakeProcesser) Start()               {}
+func (f *fakeProcesser) PID() *PID            { return nil }
+func (f *fakeProcesser) Send(*PID, any, *PID) {}
+func (f *fakeProcesser) Shutdown()            {}
+
 func (f *fakeProcesser) Invoke(batch []Envelope) {
 	// Deliberately racy: the inbox contract is that Invoke is called by
 	// at most one goroutine at a time, so the single-consumer test
