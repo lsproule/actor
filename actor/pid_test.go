@@ -3,7 +3,7 @@ package actor_test
 import "testing"
 
 import "github.com/stretchr/testify/assert"
-import "github.com/lsproule/actor"
+import "github.com/lsproule/actor/actor"
 
 func TestPIDString(t *testing.T) {
 	tests := []struct {
