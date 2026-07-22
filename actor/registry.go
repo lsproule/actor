@@ -38,8 +38,15 @@ func (r *registry) add(proc Processer) bool {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.lookup[id]; exists {
-		return false
+	if existing, exists := r.lookup[id]; exists {
+		// A restart (issue #10) calls Start -> registerProcess again on the
+		// very same *process, under the PID it never left the registry
+		// under. That is not a collision — it is the same Processer
+		// instance re-announcing itself — so tolerate it instead of
+		// rejecting the restarted actor's own re-registration. A distinct
+		// Processer claiming an ID still in use is a real collision and is
+		// rejected as before.
+		return existing == proc
 	}
 	r.lookup[id] = proc
 	return true
