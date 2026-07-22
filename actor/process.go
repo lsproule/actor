@@ -40,6 +40,8 @@ type process struct {
 	// sync/atomic: invokeMsg's recover can fire on the actor's own goroutine,
 	// which is the only writer, but tests read it from the outside.
 	restarts int32
+	// children maps child PID IDs to their PIDs. Guarded by mu.
+	children map[string]*PID
 }
 
 // compile-time proof that process satisfies the engine-facing Processer
@@ -50,17 +52,75 @@ var _ Processer = (*process)(nil)
 // opts.InboxSize.
 func newProcess(e *Engine, opts Opts) *process {
 	pid := NewPID(localAddress, opts.ID)
+	ctx := newContext(e, pid)
+	ctx.parent = opts.parent
 	return &process{
 		Opts:    opts,
 		engine:  e,
 		pid:     pid,
 		inbox:   NewInbox(opts.InboxSize),
-		context: newContext(e, pid),
+		context: ctx,
 	}
 }
 
 // PID returns the address of the actor this process drives.
 func (p *process) PID() *PID { return p.pid }
+
+// addChild records pid as a child of this process. The caller must not hold
+// p.mu; addChild takes it internally.
+func (p *process) addChild(pid *PID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.children == nil {
+		p.children = make(map[string]*PID)
+	}
+	p.children[pid.ID] = pid
+}
+
+// removeChild deletes pid from the child set. Safe to call even if the child
+// was never added or was already removed.
+func (p *process) removeChild(pid *PID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.children, pid.ID)
+}
+
+// childPIDs returns a snapshot of the current child PIDs. The caller must not
+// hold p.mu when calling this method.
+func (p *process) childPIDs() []*PID {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]*PID, 0, len(p.children))
+	for _, pid := range p.children {
+		out = append(out, pid)
+	}
+	return out
+}
+
+// shutdownChildren poisons every child and waits for all of them to finish.
+// It copies the child list before releasing the lock, then acts on the copy,
+// so the parent's mutex is never held while waiting on children.
+//
+// This cannot deadlock: each child has its own goroutine, and the parent is
+// running on its own goroutine. The parent blocks here waiting for children,
+// but children process their own poison pills independently and recursively
+// shut down their own children before signalling Done.
+func (p *process) shutdownChildren() {
+	pids := p.childPIDs()
+	if len(pids) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(len(pids))
+	for _, child := range pids {
+		child := child
+		go func() {
+			defer wg.Done()
+			<-p.engine.Poison(child).Done()
+		}()
+	}
+	wg.Wait()
+}
 
 // Start brings the actor to life in the exact order later issues depend on:
 // produce the Receiver, deliver Initialized while still unreachable, register
@@ -109,7 +169,7 @@ func (p *process) Invoke(msgs []Envelope) {
 // idempotent, so a pill whose cancel was claimed by an earlier teardown costs
 // nothing here.
 func (p *process) handlePoison(pill poisonPill) {
-	// TODO(#12): stop children first
+	p.shutdownChildren()
 	p.Shutdown()
 	if pill.cancel != nil {
 		pill.cancel()
@@ -162,6 +222,14 @@ func (p *process) Shutdown() {
 	cancels := p.cancels
 	p.cancels = nil
 	p.mu.Unlock()
+
+	// If this process has a parent, remove ourselves from the parent's child
+	// set so the parent does not leak map entries for dead children.
+	if p.parent != nil {
+		if parentProc, ok := p.engine.registry.get(p.parent).(*process); ok && parentProc != nil {
+			parentProc.removeChild(p.pid)
+		}
+	}
 
 	p.invokeMsg(Envelope{Msg: Stopped{}})
 	p.engine.unregisterProcess(p.pid)

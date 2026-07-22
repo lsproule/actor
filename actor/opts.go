@@ -29,6 +29,7 @@ type Opts struct {
 	MaxRestarts  int32
 	RestartDelay time.Duration
 	Tags         []string
+	parent       *PID
 }
 
 // DefaultOpts returns Opts wired to produce actors from p with sensible
