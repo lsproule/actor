@@ -50,6 +50,7 @@ func NewEngineConfig() EngineConfig {
 type Engine struct {
 	registry *registry
 	address  string
+	events   *eventStream
 }
 
 // NewEngine builds an Engine from cfg. It returns an error even though nothing
@@ -58,6 +59,7 @@ type Engine struct {
 func NewEngine(cfg EngineConfig) (*Engine, error) {
 	e := &Engine{
 		address: LocalLookupAddr,
+		events:  newEventStream(),
 	}
 	e.registry = newRegistry(e)
 	return e, nil
@@ -230,6 +232,34 @@ func (e *Engine) poison(pid *PID, cancel context.CancelFunc) {
 		return
 	}
 	proc.deliver(Envelope{Msg: poisonPill{cancel: cancel, graceful: true}})
+}
+
+// Subscribe adds pid to the event stream. From here on the actor receives
+// every BroadcastEvent as an ordinary message in its inbox, handled by its
+// Receive like anything else. Subscribing an already-subscribed PID changes
+// nothing: events are still delivered exactly once per subscriber.
+func (e *Engine) Subscribe(pid *PID) {
+	e.events.subscribe(pid)
+}
+
+// Unsubscribe removes pid from the event stream. Events broadcast after it
+// returns are not delivered to pid; an event already in the actor's inbox
+// still is. Unsubscribing a PID that never subscribed is a no-op.
+//
+// It is safe to call from inside a Receive, including while handling a
+// broadcast event.
+func (e *Engine) Unsubscribe(pid *PID) {
+	e.events.unsubscribe(pid)
+}
+
+// BroadcastEvent sends msg to every current subscriber and returns without
+// waiting for any of them: delivery is an ordinary Send per subscriber, so a
+// slow subscriber never holds up the broadcaster or the other subscribers.
+//
+// Subscribers that have stopped are skipped and dropped from the stream, so
+// a dead subscriber neither breaks the broadcast nor lingers.
+func (e *Engine) BroadcastEvent(msg any) {
+	e.events.broadcast(e, msg)
 }
 
 // Address returns the address this engine is reachable under.
