@@ -218,15 +218,24 @@ func TestConcurrentSubscribeUnsubscribeAndBroadcast(t *testing.T) {
 	var wg sync.WaitGroup
 	for _, pid := range pids {
 		wg.Add(3)
-		go func() { defer wg.Done(); repeat(100, func() { e.Subscribe(pid) }) }()
-		go func() { defer wg.Done(); repeat(100, func() { e.Unsubscribe(pid) }) }()
-		go func() { defer wg.Done(); repeat(100, func() { e.BroadcastEvent("event") }) }()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				e.Subscribe(pid)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				e.Unsubscribe(pid)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				e.BroadcastEvent("event")
+			}
+		}()
 	}
 	wg.Wait()
-}
-
-func repeat(n int, f func()) {
-	for i := 0; i < n; i++ {
-		f()
-	}
 }
