@@ -127,6 +127,42 @@ func (e *Engine) SendWithSender(pid *PID, msg any, sender *PID) {
 	e.sendMessage(pid, msg, sender)
 }
 
+// Request sends msg to pid and returns a *Response immediately, without
+// blocking. It gives callers ask-semantics on top of the fire-and-forget
+// Send: a tiny throwaway actor is spawned to be the reply address, msg is
+// sent with that actor as the sender (via SendWithSender), and a goroutine
+// is started that waits for the reply — or the timeout — and then tears the
+// throwaway actor down.
+//
+// The responding actor answers with an ordinary Context.Respond(x), which is
+// just a Send back to Context.Sender(). Result on the returned Response
+// blocks until that reply arrives or timeout elapses.
+func (e *Engine) Request(pid *PID, msg any, timeout time.Duration) *Response {
+	replyCh := make(chan any, 1)
+	respPID := e.SpawnFunc(func(c *Context) {
+		switch c.Message().(type) {
+		case Initialized, Started, Stopped:
+			return
+		}
+		select {
+		case replyCh <- c.Message():
+		default:
+			// A second delivery to a one-shot reply address is unexpected;
+			// drop it rather than block the responder's own inbox.
+		}
+	}, "response")
+
+	e.SendWithSender(pid, msg, respPID)
+
+	resp := &Response{
+		engine: e,
+		pid:    respPID,
+		done:   make(chan struct{}),
+	}
+	go resp.await(replyCh, timeout)
+	return resp
+}
+
 // Poison asks the actor at pid to stop once it has finished everything already
 // in its mailbox, and returns a context that is cancelled when the actor is
 // gone. It never blocks.

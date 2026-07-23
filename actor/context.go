@@ -72,6 +72,18 @@ func (c *Context) Engine() *Engine { return c.engine }
 // Receiver returns the Receiver value this actor was spawned with.
 func (c *Context) Receiver() Receiver { return c.receiver }
 
+// Respond sends msg back to whoever sent the message currently being
+// handled — an ordinary Send to Context.Sender(), nothing more. It is a
+// safe no-op when there is no sender, which happens whenever the current
+// message was sent via Engine.Send instead of Engine.Request or
+// Engine.SendWithSender.
+func (c *Context) Respond(msg any) {
+	if c.sender == nil {
+		return
+	}
+	c.engine.Send(c.sender, msg)
+}
+
 // childIDCounter provides unique suffixes for auto-generated child IDs
 // within a single parent. It is per-process, not global, so two parents
 // never collide on auto-generated child IDs.
