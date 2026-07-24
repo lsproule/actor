@@ -31,11 +31,12 @@ const LocalLookupAddr = "local"
 // concurrent Spawns neither collide nor race.
 var pidCounter uint64
 
-// EngineConfig configures a new Engine. It is intentionally empty today:
-// NewEngine already returns an error so that future configuration — a logger,
-// middleware, a custom registry — can be added and fail without touching a
-// single existing call site.
-type EngineConfig struct{}
+// EngineConfig configures a new Engine. NewEngine already returns an error so
+// that future configuration — a logger, middleware, a custom registry — can be
+// added and fail without touching a single existing call site.
+type EngineConfig struct {
+	deadletter Producer
+}
 
 // NewEngineConfig returns the default EngineConfig. Callers build on top of the
 // returned value so that fields added later inherit sensible zero defaults.
@@ -43,14 +44,23 @@ func NewEngineConfig() EngineConfig {
 	return EngineConfig{}
 }
 
+// WithDeadletter returns a copy of cfg with p as the Producer for the
+// dead-letter actor. When nil (or never called), the engine uses the default
+// dead-letter actor, which logs every undeliverable message with slog.Warn.
+func (c EngineConfig) WithDeadletter(p Producer) EngineConfig {
+	c.deadletter = p
+	return c
+}
+
 // Engine is the core runtime: it hands out PIDs, builds a process per actor,
 // keeps them in a registry, and routes Send. Everything it owns is safe for
 // concurrent use; Spawn and Send may be called from any goroutine, including
 // from inside an actor's Receive.
 type Engine struct {
-	registry *registry
-	address  string
-	events   *eventStream
+	registry   *registry
+	address    string
+	events     *eventStream
+	deadletter *PID
 }
 
 // NewEngine builds an Engine from cfg. It returns an error even though nothing
@@ -62,6 +72,14 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		events:  newEventStream(),
 	}
 	e.registry = newRegistry(e)
+
+	dlProducer := cfg.deadletter
+	if dlProducer == nil {
+		dlProducer = newDeadLetter
+	}
+	e.deadletter = e.Spawn(dlProducer, "deadletter", WithID("deadletter"))
+	e.Subscribe(e.deadletter)
+
 	return e, nil
 }
 
@@ -257,8 +275,12 @@ func (e *Engine) Unsubscribe(pid *PID) {
 // slow subscriber never holds up the broadcaster or the other subscribers.
 //
 // Subscribers that have stopped are skipped and dropped from the stream, so
-// a dead subscriber neither breaks the broadcast nor lingers.
+// a dead subscriber neither breaks the broadcast nor lingers. A nil event
+// stream (used by bare &Engine{} in lower-level tests) is silently ignored.
 func (e *Engine) BroadcastEvent(msg any) {
+	if e.events == nil {
+		return
+	}
 	e.events.broadcast(e, msg)
 }
 
@@ -304,12 +326,23 @@ func (e *Engine) sendMessage(to *PID, msg any, sender *PID) {
 	}
 }
 
-// sendMiss handles a send to an unknown or already-stopped PID. Today it is a
-// silent, non-blocking drop; issue #15 turns it into a DeadLetter event. It is
-// deliberately the only place a miss is observed so that issue has a single
-// hook to reach.
+// sendMiss handles a send to an unknown or already-stopped PID by emitting a
+// DeadLetterEvent. Two guards prevent infinite loops:
+//   - no event when the target IS the dead-letter actor itself
+//   - no event when the message is itself a DeadLetterEvent (which would be
+//     the case when a stopped subscriber triggers a miss during fan-out)
 func (e *Engine) sendMiss(pid *PID, msg any, sender *PID) {
-	// Intentionally empty until issue #15 wires DeadLetter emission here.
+	if e.deadletter != nil && pid.Equals(e.deadletter) {
+		return
+	}
+	if _, ok := msg.(DeadLetterEvent); ok {
+		return
+	}
+	e.BroadcastEvent(DeadLetterEvent{
+		Target:  pid,
+		Message: msg,
+		Sender:  sender,
+	})
 }
 
 // registerProcess adds a process to the registry. It is the hook process.Start
