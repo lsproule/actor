@@ -19,8 +19,8 @@ const defaultRestartDelay = 500 * time.Millisecond
 
 // Opts configures a process at construction time. It captures the Producer,
 // spawn identity, inbox sizing, supervision strategy (MaxRestarts and
-// RestartDelay), and user-defined metadata (Tags). All fields have documented
-// defaults supplied by DefaultOpts.
+// RestartDelay), user-defined metadata (Tags), and per-actor receive middleware.
+// All fields have documented defaults supplied by DefaultOpts.
 type Opts struct {
 	Producer     Producer
 	Kind         string
@@ -29,6 +29,7 @@ type Opts struct {
 	MaxRestarts  int32
 	RestartDelay time.Duration
 	Tags         []string
+	Middleware   []Middleware
 	parent       *PID
 }
 

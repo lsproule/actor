@@ -25,9 +25,15 @@ type process struct {
 	context  *Context
 	pid      *PID
 	receiver Receiver
-	engine   *Engine
-	mu       sync.Mutex
-	stopped  bool
+	// chain is the composed middleware chain built once in Start(), right after
+	// the Producer builds the receiver. When nil (no middleware configured),
+	// invokeMsg falls back to receiver.Receive directly — zero overhead. When
+	// set, every delivery — including lifecycle messages — passes through this
+	// function instead of calling receiver.Receive.
+	chain   ReceiveFunc
+	engine  *Engine
+	mu      sync.Mutex
+	stopped bool
 	// cancels holds one context.CancelFunc per pending Poison waiter. It is a
 	// slice and not a single func because any number of callers may poison the
 	// same actor before the first pill is handled — every one of them is
@@ -123,11 +129,16 @@ func (p *process) shutdownChildren() {
 }
 
 // Start brings the actor to life in the exact order later issues depend on:
-// produce the Receiver, deliver Initialized while still unreachable, register
-// so the PID becomes addressable, then deliver Started.
+// produce the Receiver, build the middleware chain, deliver Initialized while
+// still unreachable, register so the PID becomes addressable, then deliver
+// Started.
 func (p *process) Start() {
 	p.receiver = p.Producer()
 	p.context.receiver = p.receiver
+	// Build the middleware chain once per incarnation. A restart produces a
+	// fresh Receiver from the same Producer, and the chain is rebuilt here so
+	// any middleware state from the crashed incarnation is not leaked.
+	p.chain = buildChain(p.Opts.Middleware, p.receiver)
 	// Initialized before registration — the actor is not reachable yet
 	p.invokeMsg(Envelope{Msg: Initialized{}})
 	p.engine.BroadcastEvent(ActorInitializedEvent{PID: p.pid, Timestamp: time.Now()})
@@ -243,19 +254,27 @@ func (p *process) Shutdown() {
 	}
 }
 
-// invokeMsg re-targets the single Context to e and calls Receive. Reusing one
+// invokeMsg re-targets the single Context to e and calls Receive via the
+// middleware chain (or directly when no middleware is configured). Reusing one
 // Context per actor keeps the delivery path allocation-free.
 //
 // The deferred recover lives here, at the single-message granularity, rather
 // than around the whole batch in Invoke: a panic on message N must not cost
 // messages N+1..end their chance to run against the restarted incarnation.
+// A panic inside middleware is caught by the same recovery path as a panic in
+// Receive — the chain is rebuilt in Start() so a restart naturally rebuilds it.
 func (p *process) invokeMsg(e Envelope) {
 	defer func() {
 		if v := recover(); v != nil {
 			p.tryRestart(v)
 		}
 	}()
-	p.receiver.Receive(p.context.withEnvelope(e))
+	ctx := p.context.withEnvelope(e)
+	if p.chain != nil {
+		p.chain(ctx)
+	} else {
+		p.receiver.Receive(ctx)
+	}
 }
 
 // tryRestart implements the "let it crash" supervision policy for a value
