@@ -123,7 +123,7 @@ func TestCascadeShutdown(t *testing.T) {
 	assert.Equal(t, 11, stoppedCount, "all actors must receive Stopped")
 	mu.Unlock()
 
-	assert.Equal(t, 0, e.Registry().len(), "registry must be empty after cascade shutdown")
+	assert.Equal(t, 0, userActors(e), "registry must be empty after cascade shutdown")
 }
 
 // TestBottomUpOrdering records a global ordered log and asserts every child's
@@ -194,7 +194,7 @@ func TestDeepTree(t *testing.T) {
 		}
 	}, "root")
 
-	require.Equal(t, 106, e.Registry().len(), "all actors must be registered")
+	require.Equal(t, 106, userActors(e), "all actors must be registered")
 
 	ctx := e.Poison(root)
 	select {
@@ -203,7 +203,7 @@ func TestDeepTree(t *testing.T) {
 		t.Fatal("root poison never completed within 5s")
 	}
 
-	require.Equal(t, 0, e.Registry().len(), "registry must be empty after root poison")
+	require.Equal(t, 0, userActors(e), "registry must be empty after root poison")
 }
 
 // TestChildSelfStopRemovesFromParent poisons a child directly, then asserts
@@ -277,7 +277,7 @@ func TestDeepTreeRepeated(t *testing.T) {
 				t.Fatal("root poison never completed within 5s")
 			}
 
-			require.Equal(t, 0, e.Registry().len(), "registry must return to original size")
+			require.Equal(t, 0, userActors(e), "registry must return to original size")
 		}()
 	}
 }

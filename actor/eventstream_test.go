@@ -9,11 +9,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// streamRecorder forwards broadcast events to ch, skipping both the actor's
+// own lifecycle messages and the events the engine itself emits (actor
+// lifecycle, dead letters). These tests are about the fan-out mechanics, so a
+// subscriber must only see what the test broadcast.
+type streamRecorder struct {
+	ch chan any
+}
+
+func (r *streamRecorder) Receive(c *Context) {
+	switch c.Message().(type) {
+	case Initialized, Started, Stopped:
+		return
+	case ActorInitializedEvent, ActorStartedEvent, ActorStoppedEvent,
+		ActorRestartedEvent, DeadLetterEvent:
+		return
+	}
+	r.ch <- c.Message()
+}
+
 // spawnSubscriber spawns a recorder and subscribes it to the event stream,
 // returning its PID and the channel every event it receives lands on.
 func spawnSubscriber(e *Engine) (*PID, chan any) {
 	ch := make(chan any, 1024)
-	pid := e.Spawn(func() Receiver { return &recorder{ch: ch} }, "subscriber")
+	pid := e.Spawn(func() Receiver { return &streamRecorder{ch: ch} }, "subscriber")
 	e.Subscribe(pid)
 	return pid, ch
 }
@@ -130,13 +149,13 @@ func TestStoppedSubscriberIsPrunedAndStreamSurvives(t *testing.T) {
 	e := newTestEngine(t)
 	dead, _ := spawnSubscriber(e)
 	_, alive := spawnSubscriber(e)
-	require.Equal(t, 2, e.events.len())
+	require.Equal(t, 2, userSubscribers(e))
 
 	<-e.Poison(dead).Done()
 	e.BroadcastEvent("event")
 
 	assert.Equal(t, "event", mustReceive(t, alive))
-	assert.Equal(t, 1, e.events.len(), "stopped subscriber must be pruned from the stream")
+	assert.Equal(t, 1, userSubscribers(e), "stopped subscriber must be pruned from the stream")
 }
 
 // churner subscribes and unsubscribes itself from inside its own Receive,
@@ -170,7 +189,7 @@ func TestSubscribeDuringBroadcastHandling(t *testing.T) {
 		require.Equal(t, "event", mustReceive(t, got))
 	}
 
-	assert.Equal(t, 1, e.events.len())
+	assert.Equal(t, 1, userSubscribers(e))
 }
 
 // TestBroadcast100Subscribers1000Events is acceptance criterion 7: 100k

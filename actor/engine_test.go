@@ -52,6 +52,24 @@ func (c *counter) Receive(ctx *Context) {
 	}
 }
 
+// engineInternalActors is the number of actors NewEngine spawns for its own
+// plumbing — today just the dead-letter actor, which is registered and
+// subscribed to the event stream like any other actor. Tests count user actors
+// relative to this baseline rather than against a bare, empty registry.
+const engineInternalActors = 1
+
+// userActors reports the registered actor count with the engine's own internal
+// actors excluded.
+func userActors(e *Engine) int {
+	return e.Registry().len() - engineInternalActors
+}
+
+// userSubscribers reports the event-stream subscriber count with the engine's
+// own internal subscribers (the dead-letter actor) excluded.
+func userSubscribers(e *Engine) int {
+	return e.events.len() - engineInternalActors
+}
+
 func newTestEngine(t *testing.T) *Engine {
 	t.Helper()
 	e, err := NewEngine(NewEngineConfig())
@@ -125,7 +143,7 @@ func TestSpawnUniqueIDs(t *testing.T) {
 		seen[pid.String()] = struct{}{}
 	}
 	require.Len(t, seen, n)
-	require.Equal(t, n, e.Registry().len())
+	require.Equal(t, n, userActors(e))
 }
 
 // TestSpawnFunc checks that a func-based actor sees Started (delivered during
@@ -209,7 +227,7 @@ func TestSendToUnknownPID(t *testing.T) {
 	case <-time.After(deliverTimeout):
 		t.Fatal("Send to unknown PID blocked")
 	}
-	require.Equal(t, 0, e.Registry().len())
+	require.Equal(t, 0, userActors(e))
 }
 
 // TestSpawnExplicitIDCollisionKeepsIncumbent documents the chosen collision
@@ -222,7 +240,7 @@ func TestSpawnExplicitIDCollisionKeepsIncumbent(t *testing.T) {
 
 	require.True(t, first.Equals(second))
 	require.Equal(t, "local/svc/only", first.String())
-	require.Equal(t, 1, e.Registry().len())
+	require.Equal(t, 1, userActors(e))
 }
 
 // TestSendWithSender checks the sender PID is delivered through the Context.
