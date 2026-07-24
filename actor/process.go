@@ -60,13 +60,15 @@ func newProcess(e *Engine, opts Opts) *process {
 	pid := NewPID(localAddress, opts.ID)
 	ctx := newContext(e, pid)
 	ctx.parent = opts.parent
-	return &process{
+	p := &process{
 		Opts:    opts,
 		engine:  e,
 		pid:     pid,
 		inbox:   NewInbox(opts.InboxSize),
 		context: ctx,
 	}
+	ctx.proc = p
+	return p
 }
 
 // PID returns the address of the actor this process drives.
