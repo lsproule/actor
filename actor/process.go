@@ -130,10 +130,12 @@ func (p *process) Start() {
 	p.context.receiver = p.receiver
 	// Initialized before registration — the actor is not reachable yet
 	p.invokeMsg(Envelope{Msg: Initialized{}})
+	p.engine.BroadcastEvent(ActorInitializedEvent{PID: p.pid, Timestamp: time.Now()})
 	// registry insertion; #7 builds it and #8 wires this hook
 	p.engine.registerProcess(p)
 	// Started after registration — user messages may follow immediately
 	p.invokeMsg(Envelope{Msg: Started{}})
+	p.engine.BroadcastEvent(ActorStartedEvent{PID: p.pid, Timestamp: time.Now()})
 }
 
 // Send is the outbound path used by Context helpers later. It routes msg from
@@ -232,6 +234,7 @@ func (p *process) Shutdown() {
 	}
 
 	p.invokeMsg(Envelope{Msg: Stopped{}})
+	p.engine.BroadcastEvent(ActorStoppedEvent{PID: p.pid, Timestamp: time.Now()})
 	p.engine.unregisterProcess(p.pid)
 	_ = p.inbox.Stop()
 
@@ -269,7 +272,6 @@ func (p *process) tryRestart(v any) {
 			"panic", v,
 			"stack", string(stack),
 		)
-		// TODO(#15): broadcast ActorStoppedEvent here
 		p.Shutdown()
 		return
 	}
@@ -283,7 +285,6 @@ func (p *process) tryRestart(v any) {
 			"panic", v,
 			"stack", string(stack),
 		)
-		// TODO(#15): broadcast ActorStoppedEvent here
 		p.Shutdown()
 		return
 	}
@@ -296,17 +297,19 @@ func (p *process) tryRestart(v any) {
 		"stack", string(stack),
 	)
 
+	p.engine.BroadcastEvent(ActorRestartedEvent{
+		PID:        p.pid,
+		Timestamp:  time.Now(),
+		Stacktrace: stack,
+		Reason:     v,
+		Restarts:   restarts,
+	})
+
 	// This sleep runs on the actor's own inbox-processor goroutine, not the
 	// engine's: every actor has its own single-consumer processor (see
 	// inbox.go), so blocking here only delays this actor's own next message.
 	time.Sleep(p.Opts.RestartDelay)
 
-	// TODO(#15): broadcast ActorRestartedEvent here
-	// Same *process, same PID, same inbox: Start() below produces a fresh
-	// Receiver and replays Initialized -> Started. registerProcess will try
-	// to re-add this exact *process under a PID already in the registry;
-	// registry.add tolerates that specific case (see its comment) instead of
-	// treating it as a collision.
 	p.Start()
 }
 
