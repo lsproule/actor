@@ -2,7 +2,9 @@ package actor
 
 import (
 	"strconv"
+	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // Context is the view an actor sees while handling a single message. It
@@ -27,6 +29,12 @@ type Context struct {
 	// children maps string names to child PIDs. It is declared now so that
 	// the struct layout is stable; it will be populated by issue #12.
 	children map[string]*PID
+	// proc is the process this Context belongs to. It gives the child
+	// helpers direct access to the process's child set without a registry
+	// lookup on every call. It is set once, in newProcess, and never
+	// changes; a Context built without a process (lower-level unit tests)
+	// leaves it nil and the child helpers report no children.
+	proc *process
 }
 
 // newContext allocates a Context for the given engine and actor identity.
@@ -119,4 +127,77 @@ func (c *Context) SpawnChild(p Producer, kind string, opts ...OptFunc) *PID {
 // of Engine.SpawnFunc.
 func (c *Context) SpawnChildFunc(f func(*Context), kind string, opts ...OptFunc) *PID {
 	return c.SpawnChild(func() Receiver { return &funcReceiver{f: f} }, kind, opts...)
+}
+
+// Send routes msg to the actor addressed by to with this actor as the
+// sender. That is the entire difference from Engine.Send, and it is what
+// makes the receiving side's Respond work: the receiver sees c.Sender() as
+// this actor and can answer it directly.
+//
+// It is safe to call during Initialized and Stopped as well as during
+// normal message handling — the send goes through the engine, which handles
+// unknown or already-stopped targets via the dead-letter path, never a
+// panic.
+func (c *Context) Send(to *PID, msg any) {
+	c.engine.SendWithSender(to, msg, c.pid)
+}
+
+// Forward re-sends the message currently being handled to the actor
+// addressed by to, preserving the ORIGINAL sender — it does not substitute
+// this actor's PID. That is the difference between forwarding and
+// re-sending: after a router Forwards a request to a worker, the worker's
+// Respond reaches the original requester directly, not the router. Use
+// c.Send(to, c.Message()) instead when the reply should come back to this
+// actor.
+func (c *Context) Forward(to *PID) {
+	c.engine.SendWithSender(to, c.message, c.sender)
+}
+
+// Child returns the PID of a direct child by the short name it was spawned
+// under — the ID passed to SpawnChild (via WithID, or the auto-generated
+// suffix), not the fully qualified PID string. "kind/id" is also accepted
+// to disambiguate two children with the same ID under different kinds. It
+// returns nil when no such child exists — never a panic.
+//
+// During Initialized the actor has not spawned anything yet, so Child
+// always returns nil there.
+func (c *Context) Child(id string) *PID {
+	if c.proc == nil {
+		return nil
+	}
+	qualified := c.pid.Child(id).ID
+	for _, pid := range c.proc.childPIDs() {
+		if pid.ID == qualified || shortName(pid.ID) == id {
+			return pid
+		}
+	}
+	return nil
+}
+
+// Children returns a snapshot of the PIDs of every direct child, in no
+// particular order. The slice is a fresh copy taken under the process's
+// lock: mutating it cannot corrupt the actor's child set. During
+// Initialized and Stopped it is simply empty.
+func (c *Context) Children() []*PID {
+	if c.proc == nil {
+		return nil
+	}
+	return c.proc.childPIDs()
+}
+
+// SendRepeat sends msg to the actor addressed by to immediately and then
+// again every interval, until the returned SendRepeater is stopped. It is
+// sugar over Engine.SendRepeat, tied to this actor only in that the actor
+// typically stores the repeater and stops it on Stopped.
+func (c *Context) SendRepeat(to *PID, msg any, interval time.Duration) *SendRepeater {
+	return c.engine.SendRepeat(to, msg, interval)
+}
+
+// shortName returns the last path segment of a registry ID: "kind/id"
+// yields "id". It is the name a parent uses to find a child via Child.
+func shortName(id string) string {
+	if i := strings.LastIndexByte(id, '/'); i >= 0 {
+		return id[i+1:]
+	}
+	return id
 }
